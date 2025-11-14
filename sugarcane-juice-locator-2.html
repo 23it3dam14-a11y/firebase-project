@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sugarcane Juice Locator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --color-primary: #10B981; /* Emerald-500 */
+            --color-secondary: #FBBF24; /* Amber-400 */
+            --color-dark: #1F2937; /* Gray-800 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+        }
+        .app-container {
+            width: 100%;
+            max-width: 480px; /* Mobile first */
+            background: white;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+            border-radius: 1rem;
+            margin-top: 1.5rem;
+            padding-bottom: 2rem;
+        }
+        .main-button {
+            background-color: var(--color-primary);
+            color: white;
+            transition: background-color 0.2s;
+        }
+        .main-button:hover:not(:disabled) {
+            background-color: #059669;
+        }
+        .main-button:disabled {
+            background-color: #6EE7B7;
+            cursor: not-allowed;
+        }
+        .tab-button.active {
+            color: var(--color-primary);
+            border-bottom: 3px solid var(--color-primary);
+            font-weight: 600;
+        }
+        .shop-card {
+            border-left: 5px solid var(--color-secondary);
+        }
+        /* Custom modal styles */
+        .modal {
+            background-color: rgba(0, 0, 0, 0.5);
+            transition: opacity 0.3s ease-in-out;
+        }
+        .hidden-modal {
+            opacity: 0;
+            pointer-events: none;
+        }
+    </style>
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, updateDoc, deleteDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set Firebase Log Level to Debug for development visibility
+        setLogLevel('Debug');
+
+        // Global variables for Firebase setup (MANDATORY)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof _firebase_config !== 'undefined' ? JSON.parse(_firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let currentUserId = null;
+        let isAuthReady = false;
+
+        // --- Core Utility Functions ---
+
+        // Function to show custom modal messages
+        function showMessage(title, message) {
+            const modal = document.getElementById('custom-modal');
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-message').textContent = message;
+            modal.classList.remove('hidden-modal');
+        }
+
+        // Haversine distance calculation (simplified to meters)
+        function getDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3; // metres
+            const φ1 = lat1 * Math.PI / 180; // φ, λ in radians
+            const φ2 = lat2 * Math.PI / 180;
+            const Δφ = (lat2 - lat1) * Math.PI / 180;
+            const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+            const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                      Math.cos(φ1) * Math.cos(φ2) *
+                      Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+            return R * c; // Distance in meters
+        }
+
+        // --- Firebase Initialization and Auth ---
+
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                showMessage('Error', 'Firebase configuration not available. Cannot initialize the app.');
+                return;
+            }
+
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Sign in with custom token if available, otherwise anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                    console.log('Signed in with custom token.');
+                } else {
+                    await signInAnonymously(auth);
+                    console.log('Signed in anonymously.');
+                }
+
+                // Listen for auth state changes
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        console.log('Auth state changed. User ID:', currentUserId);
+                    } else {
+                        // This should not happen if we sign in anonymously above, but good practice
+                        currentUserId = 'anonymous-' + crypto.randomUUID();
+                    }
+                    isAuthReady = true;
+                    document.getElementById('user-id-display').textContent = currentUserId;
+                    setupListeners();
+                });
+
+            } catch (error) {
+                console.error("Error initializing Firebase or signing in:", error);
+                showMessage('Authentication Error', Failed to initialize Firebase: ${error.message}.);
+            }
+        }
+
+        // --- Location Services ---
+
+        let userLocation = null;
+
+        function getUserLocation() {
+            const statusElement = document.getElementById('location-status');
+            statusElement.textContent = 'Getting your location...';
+            statusElement.classList.remove('text-red-500', 'text-green-500');
+            statusElement.classList.add('text-yellow-500');
+
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        userLocation = {
+                            lat: position.coords.latitude,
+                            lng: position.coords.longitude
+                        };
+                        statusElement.textContent = Location found! (${userLocation.lat.toFixed(4)}, ${userLocation.lng.toFixed(4)});
+                        statusElement.classList.remove('text-yellow-500');
+                        statusElement.classList.add('text-green-500');
+                        document.querySelectorAll('.order-button').forEach(btn => btn.disabled = false);
+                        renderNearestShop();
+                    },
+                    (error) => {
+                        userLocation = null;
+                        statusElement.textContent = 'Location failed. Please enable location services.';
+                        statusElement.classList.remove('text-yellow-500');
+                        statusElement.classList.add('text-red-500');
+                        console.error('Geolocation error:', error);
+                        document.querySelectorAll('.order-button').forEach(btn => btn.disabled = true);
+                    },
+                    { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+                );
+            } else {
+                statusElement.textContent = 'Geolocation is not supported by this browser.';
+                statusElement.classList.remove('text-yellow-500');
+                statusElement.classList.add('text-red-500');
+                document.querySelectorAll('.order-button').forEach(btn => btn.disabled = true);
+            }
+        }
+
+        // --- Firestore Data Models and Paths ---
+
+        // Shop Model: { name: string, lat: number, lng: number, userId: string, isAvailable: boolean }
+        const SHOPS_COLLECTION_PATH = /artifacts/${appId}/public/data/sugarcaneShops;
+
+        // Order Model: { shopId: string, shopName: string, customerId: string, items: number, status: 'Pending' | 'Ready' | 'Delivered', timestamp: number }
+        const ORDERS_COLLECTION_PATH = /artifacts/${appId}/public/data/sugarcaneOrders;
+
+        // --- Shop Management Functions (Shop Tab) ---
+
+        async function registerShop(event) {
+            event.preventDefault();
+            if (!isAuthReady || !currentUserId) {
+                showMessage('Error', 'Authentication not ready. Please wait.');
+                return;
+            }
+
+            const shopName = document.getElementById('shop-name-input').value.trim();
+            if (!shopName) {
+                showMessage('Input Error', 'Please enter a shop name.');
+                return;
+            }
+
+            const registerButton = document.getElementById('register-shop-btn');
+            registerButton.disabled = true;
+            registerButton.textContent = 'Registering...';
+
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    async (position) => {
+                        const shopLocation = {
+                            lat: position.coords.latitude,
+                            lng: position.coords.longitude
+                        };
+
+                        try {
+                            const shopDocRef = doc(db, SHOPS_COLLECTION_PATH, currentUserId);
+                            await setDoc(shopDocRef, {
+                                name: shopName,
+                                lat: shopLocation.lat,
+                                lng: shopLocation.lng,
+                                userId: currentUserId,
+                                isAvailable: true,
+                                lastUpdated: Date.now()
+                            });
+                            showMessage('Success', Shop "${shopName}" registered successfully!);
+                            document.getElementById('shop-registration-form').reset();
+                        } catch (e) {
+                            console.error("Error registering shop: ", e);
+                            showMessage('Database Error', Failed to register shop: ${e.message});
+                        } finally {
+                            registerButton.disabled = false;
+                            registerButton.textContent = 'Register Shop';
+                        }
+                    },
+                    (error) => {
+                        console.error('Geolocation error:', error);
+                        showMessage('Location Error', 'Could not get location to register shop. Please check permissions.');
+                        registerButton.disabled = false;
+                        registerButton.textContent = 'Register Shop';
+                    },
+                    { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+                );
+            } else {
+                showMessage('Browser Error', 'Geolocation is not supported. Cannot register shop.');
+                registerButton.disabled = false;
+                registerButton.textContent = 'Register Shop';
+            }
+        }
+
+        async function toggleShopAvailability(isAvailable) {
+            if (!isAuthReady || !currentUserId) return;
+            try {
+                const shopDocRef = doc(db, SHOPS_COLLECTION_PATH, currentUserId);
+                await updateDoc(shopDocRef, { isAvailable: isAvailable, lastUpdated: Date.now() });
+                console.log(Shop availability set to ${isAvailable});
+            } catch (e) {
+                console.error("Error updating shop availability: ", e);
+                // If it fails, maybe the shop hasn't been created yet.
+            }
+        }
+
+        // --- Order Placement Functions (Customer Tab) ---
+
+        let allShops = [];
+        let nearestShop = null;
+
+        function renderNearestShop() {
+            const nearestShopContainer = document.getElementById('nearest-shop-container');
+            const orderPanel = document.getElementById('order-panel');
+
+            if (!userLocation || allShops.length === 0) {
+                nearestShopContainer.innerHTML = '<p class="text-sm text-gray-500">Waiting for location and shop data...</p>';
+                orderPanel.classList.add('hidden');
+                nearestShop = null;
+                return;
+            }
+
+            // Find the nearest available shop
+            let minDistance = Infinity;
+            nearestShop = null;
+
+            allShops.filter(shop => shop.isAvailable).forEach(shop => {
+                const distance = getDistance(userLocation.lat, userLocation.lng, shop.lat, shop.lng);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    nearestShop = { ...shop, distance: distance };
+                }
+            });
+
+            if (nearestShop) {
+                const distanceKm = (nearestShop.distance / 1000).toFixed(2);
+                nearestShopContainer.innerHTML = `
+                    <div class="shop-card p-4 rounded-lg bg-emerald-50 shadow-md">
+                        <p class="text-lg font-bold text-green-700">${nearestShop.name}</p>
+                        <p class="text-sm text-gray-600">ID: ${nearestShop.userId.substring(0, 8)}...</p>
+                        <p class="text-xs text-green-600 font-semibold">Closest Available Shop!</p>
+                        <p class="text-sm text-gray-700 mt-1">Distance: <span class="font-bold">${distanceKm} km</span></p>
+                    </div>
+                `;
+                document.getElementById('shop-name-display').textContent = nearestShop.name;
+                orderPanel.classList.remove('hidden');
+            } else {
+                nearestShopContainer.innerHTML = '<p class="text-sm text-red-500">No available shops found nearby.</p>';
+                orderPanel.classList.add('hidden');
+            }
+        }
+
+        async function placeOrder() {
+            if (!isAuthReady || !currentUserId) {
+                showMessage('Error', 'Authentication not ready. Please wait.');
+                return;
+            }
+            if (!nearestShop) {
+                showMessage('Error', 'No nearest shop is selected. Cannot place order.');
+                return;
+            }
+
+            const quantityInput = document.getElementById('juice-quantity');
+            const items = parseInt(quantityInput.value, 10);
+
+            if (isNaN(items) || items <= 0) {
+                showMessage('Input Error', 'Please enter a valid quantity of 1 or more.');
+                return;
+            }
+
+            const orderButton = document.getElementById('place-order-btn');
+            orderButton.disabled = true;
+            orderButton.textContent = 'Placing Order...';
+
+            try {
+                await addDoc(collection(db, ORDERS_COLLECTION_PATH), {
+                    shopId: nearestShop.userId,
+                    shopName: nearestShop.name,
+                    customerId: currentUserId,
+                    items: items,
+                    status: 'Pending',
+                    timestamp: Date.now()
+                });
+                showMessage('Order Placed!', Your order for ${items} glasses of juice has been sent to ${nearestShop.name}.);
+                quantityInput.value = 1; // Reset quantity
+            } catch (e) {
+                console.error("Error placing order: ", e);
+                showMessage('Database Error', Failed to place order: ${e.message});
+            } finally {
+                orderButton.disabled = false;
+                orderButton.textContent = 'Place Order';
+            }
+        }
+
+
+        // --- Firestore Listeners ---
+
+        function setupListeners() {
+            if (!isAuthReady) return;
+
+            // 1. Listen to all shops (for Customer view)
+            const shopsQuery = query(collection(db, SHOPS_COLLECTION_PATH));
+            onSnapshot(shopsQuery, (snapshot) => {
+                allShops = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                console.log(Shops updated. Total shops: ${allShops.length});
+                if (document.getElementById('tab-customer').classList.contains('active-tab')) {
+                    renderNearestShop(); // Re-render if in customer tab
+                }
+            }, (error) => {
+                console.error("Error listening to shops:", error);
+            });
+
+            // 2. Listen to orders assigned to the current user's shop (for Shop view)
+            const shopOrdersQuery = query(collection(db, ORDERS_COLLECTION_PATH), where("shopId", "==", currentUserId));
+            onSnapshot(shopOrdersQuery, (snapshot) => {
+                const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => a.timestamp - b.timestamp);
+                renderShopOrders(orders);
+            }, (error) => {
+                console.error("Error listening to shop orders:", error);
+            });
+
+            // 3. Listen to the customer's own orders (for Customer view)
+            const customerOrdersQuery = query(collection(db, ORDERS_COLLECTION_PATH), where("customerId", "==", currentUserId));
+            onSnapshot(customerOrdersQuery, (snapshot) => {
+                const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => b.timestamp - a.timestamp);
+                renderCustomerOrders(orders);
+            }, (error) => {
+                console.error("Error listening to customer orders:", error);
+            });
+        }
+
+        // --- Renderer Functions ---
+
+        function renderShopOrders(orders) {
+            const ordersList = document.getElementById('shop-orders-list');
+            ordersList.innerHTML = ''; // Clear previous orders
+
+            if (orders.length === 0) {
+                ordersList.innerHTML = '<p class="text-gray-500 text-center py-4">No pending orders yet. Sit back and relax!</p>';
+                return;
+            }
+
+            orders.forEach(order => {
+                const timeStr = new Date(order.timestamp).toLocaleTimeString();
+                let statusColor = { 'Pending': 'bg-yellow-100 text-yellow-800', 'Ready': 'bg-blue-100 text-blue-800', 'Delivered': 'bg-green-100 text-green-800' }[order.status] || 'bg-gray-100 text-gray-800';
+
+                let actionButton = '';
+                if (order.status === 'Pending') {
+                    actionButton = <button data-id="${order.id}" data-new-status="Ready" class="update-status-btn bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold px-3 py-1 rounded-full shadow-md transition duration-150">Mark Ready</button>;
+                } else if (order.status === 'Ready') {
+                    actionButton = <button data-id="${order.id}" data-new-status="Delivered" class="update-status-btn bg-green-500 hover:bg-green-600 text-white text-xs font-semibold px-3 py-1 rounded-full shadow-md transition duration-150">Mark Delivered</button>;
+                }
+
+                ordersList.innerHTML += `
+                    <div class="p-4 border-b last:border-b-0 flex justify-between items-center bg-white hover:bg-gray-50 transition duration-100">
+                        <div>
+                            <p class="text-sm font-bold text-gray-800">${order.items} Glass(es) of Juice</p>
+                            <p class="text-xs text-gray-500">Customer ID: ${order.customerId.substring(0, 8)}...</p>
+                            <span class="text-xs font-medium ${statusColor} px
